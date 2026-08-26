@@ -158,7 +158,18 @@ export class SyncOrchestrator {
 
 		for (const path of allPaths) {
 			try {
-				await this.applyForPath(path, localByPath.get(path), remoteByPath.get(path), tombstonedPaths.has(path), manifest, summary);
+				const remote = remoteByPath.get(path);
+				let tombstoned = tombstonedPaths.has(path);
+				if (tombstoned && remote) {
+					// Both the tombstone marker and a live object exist for this path — the
+					// result of a tombstone() or revive-local() that copied/uploaded successfully
+					// but failed on the follow-up delete. The object is still live, so the delete
+					// never really completed: clean up the stray marker and treat the path as
+					// live rather than deleting local copies of still-existing content.
+					await this.engine.removeTombstone(path);
+					tombstoned = false;
+				}
+				await this.applyForPath(path, localByPath.get(path), remote, tombstoned, manifest, summary);
 			} catch (err) {
 				console.error(`MinIO sync: failed to sync ${path}`, err);
 				summary.errors.push({ path, message: (err as Error).message });
@@ -189,8 +200,12 @@ export class SyncOrchestrator {
 			const bytes = await adapter.readBinary(path);
 			return md5Hex(bytes);
 		};
+		const remoteHash = async () => {
+			const bytes = await this.engine.downloadToBuffer(path);
+			return md5Hex(bytes);
+		};
 
-		const action = await decideAction(path, local, remote, remoteTombstoned, manifestEntry, localHash);
+		const action = await decideAction(path, local, remote, remoteTombstoned, manifestEntry, localHash, remoteHash);
 
 		switch (action.type) {
 			case 'noop':
@@ -267,6 +282,11 @@ export class SyncOrchestrator {
 		const { etag: conflictEtag } = await this.engine.upload(conflictPath, bytes, localMtimeOfBytes);
 
 		const remoteBytes = await this.engine.downloadToBuffer(path);
+		// Re-mark right before the write: the suppression window is short (2s) and the two
+		// network calls above (conflict upload + remote download) can easily outlast it,
+		// which would otherwise let this self-write slip through as an unsuppressed
+		// 'modify' event and get treated as a fresh local edit.
+		this.markSuppressed(path);
 		await adapter.writeBinary(path, remoteBytes);
 		const originalStat = await adapter.stat(path);
 

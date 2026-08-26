@@ -4,7 +4,7 @@ import {
 	MinioSyncSettings,
 	MinioSyncSettingTab,
 } from './settings';
-import { SyncEngine } from './sync';
+import { SyncEngine, TOMBSTONE_PREFIX } from './sync';
 import { SyncOrchestrator } from './sync-orchestrator';
 import { SetupModal } from './setup-modal';
 
@@ -211,7 +211,11 @@ export default class MinioSyncPlugin extends Plugin {
 		}
 
 		if (this.sync) {
-			const excludePrefixes = [`${this.app.vault.configDir}/plugins/${this.manifest.id}`];
+			// TOMBSTONE_PREFIX is excluded too: it's a reserved remote-only namespace, but if a
+			// local folder ever exists at that exact path (however unlikely), it must never be
+			// scanned/pushed/deleted through the normal sync path — that would corrupt tombstone
+			// state instead of just being synced content.
+			const excludePrefixes = [`${this.app.vault.configDir}/plugins/${this.manifest.id}`, TOMBSTONE_PREFIX];
 			const manifestPath = `${excludePrefixes[0]}/sync-state.json`;
 			this.orchestrator = new SyncOrchestrator(
 				this.app,

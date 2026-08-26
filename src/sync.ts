@@ -2,7 +2,13 @@ import { S3Client } from './s3-client';
 import type { MinioSyncSettings } from './settings';
 import type { RemoteEntry } from './sync-types';
 
-export const TOMBSTONE_PREFIX = '__deleted__';
+// Tombstones live under a reserved top-level namespace in the bucket, entirely separate
+// from real vault paths, rather than as a filename prefix in the same directory — a
+// filename prefix can collide with a real file that happens to be named that way. This
+// name is deliberately unusual (dot-prefixed, package-scoped) to make an accidental
+// collision with a real vault folder name as unlikely as possible; main.ts also excludes
+// it from local sync entirely as defense in depth.
+export const TOMBSTONE_PREFIX = '.minio-vault-sync-tombstones';
 
 function splitPath(path: string): { dir: string; base: string } {
 	const idx = path.lastIndexOf('/');
@@ -15,18 +21,15 @@ function joinPath(dir: string, base: string): string {
 }
 
 export function tombstoneKeyFor(path: string): string {
-	const { dir, base } = splitPath(path);
-	return joinPath(dir, `${TOMBSTONE_PREFIX}${base}`);
+	return `${TOMBSTONE_PREFIX}/${path}`;
 }
 
 export function isTombstoneKey(key: string): boolean {
-	const { base } = splitPath(key);
-	return base.startsWith(TOMBSTONE_PREFIX);
+	return key === TOMBSTONE_PREFIX || key.startsWith(`${TOMBSTONE_PREFIX}/`);
 }
 
 export function originalPathFromTombstoneKey(key: string): string {
-	const { dir, base } = splitPath(key);
-	return joinPath(dir, base.slice(TOMBSTONE_PREFIX.length));
+	return key.slice(TOMBSTONE_PREFIX.length + 1);
 }
 
 export function conflictPathFor(path: string, deviceNickname: string, disambiguator?: string): string {
