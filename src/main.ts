@@ -55,6 +55,7 @@ export default class MinioSyncPlugin extends Plugin {
 					await this.sync.testConnection();
 					new Notice('MinIO connection OK');
 				} catch (err) {
+					console.error('MinIO sync: connection test failed', err);
 					new Notice(`MinIO connection failed: ${(err as Error).message}`);
 				}
 			},
@@ -70,10 +71,12 @@ export default class MinioSyncPlugin extends Plugin {
 				}
 				try {
 					const summary = await this.orchestrator.runFullSync();
+					if (summary.errors.length) console.error('MinIO sync: per-file errors', summary.errors);
 					new Notice(
-						`MinIO sync done: ${summary.pushed.length} pushed, ${summary.pulled.length} pulled, ${summary.conflicts.length} conflict(s)`,
+						`MinIO sync done: ${summary.pushed.length} pushed, ${summary.pulled.length} pulled, ${summary.conflicts.length} conflict(s), ${summary.errors.length} error(s)`,
 					);
 				} catch (err) {
+					console.error('MinIO sync: sync-now failed', err);
 					new Notice(`MinIO sync failed: ${(err as Error).message}`);
 				} finally {
 					this.updateSyncStatusBar();
@@ -88,7 +91,13 @@ export default class MinioSyncPlugin extends Plugin {
 			this.updateSyncStatusBar();
 			this.orchestrator
 				?.runFullSync()
-				.catch((err) => new Notice(`MinIO sync: startup sync failed: ${(err as Error).message}`))
+				.then((summary) => {
+					if (summary.errors.length) console.error('MinIO sync: per-file errors', summary.errors);
+				})
+				.catch((err) => {
+					console.error('MinIO sync: startup sync failed', err);
+					new Notice(`MinIO sync: startup sync failed: ${(err as Error).message}`);
+				})
 				.finally(() => this.updateSyncStatusBar());
 		});
 
@@ -137,7 +146,10 @@ export default class MinioSyncPlugin extends Plugin {
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
 				this.orchestrator
 					?.deleteSingleFile(file.path)
-					.catch((err) => new Notice(`MinIO sync: failed to delete ${file.path}: ${(err as Error).message}`))
+					.catch((err) => {
+						console.error(`MinIO sync: failed to delete ${file.path}`, err);
+						new Notice(`MinIO sync: failed to delete ${file.path}: ${(err as Error).message}`);
+					})
 					.finally(() => this.updateSyncStatusBar());
 			}),
 		);
@@ -147,7 +159,10 @@ export default class MinioSyncPlugin extends Plugin {
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
 				this.orchestrator
 					?.renameFile(oldPath, file.path)
-					.catch((err) => new Notice(`MinIO sync: failed to sync rename of ${file.path}: ${(err as Error).message}`))
+					.catch((err) => {
+						console.error(`MinIO sync: failed to sync rename of ${file.path}`, err);
+						new Notice(`MinIO sync: failed to sync rename of ${file.path}: ${(err as Error).message}`);
+					})
 					.finally(() => this.updateSyncStatusBar());
 			}),
 		);
@@ -209,7 +224,13 @@ export default class MinioSyncPlugin extends Plugin {
 			this.intervalId = window.setInterval(() => {
 				this.orchestrator
 					?.runFullSync()
-					.catch((err) => new Notice(`MinIO sync: periodic sync failed: ${(err as Error).message}`))
+					.then((summary) => {
+						if (summary.errors.length) console.error('MinIO sync: per-file errors', summary.errors);
+					})
+					.catch((err) => {
+						console.error('MinIO sync: periodic sync failed', err);
+						new Notice(`MinIO sync: periodic sync failed: ${(err as Error).message}`);
+					})
 					.finally(() => this.updateSyncStatusBar());
 			}, this.settings.syncIntervalMinutes * 60_000);
 			this.registerInterval(this.intervalId);

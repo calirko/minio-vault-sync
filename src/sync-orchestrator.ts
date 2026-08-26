@@ -57,7 +57,10 @@ export class SyncOrchestrator {
 		if (existing) window.clearTimeout(existing);
 		const timer = window.setTimeout(() => {
 			this.debounceTimers.delete(path);
-			this.pushSingleFile(path).catch((err) => new Notice(`MinIO sync: failed to push ${path}: ${(err as Error).message}`));
+			this.pushSingleFile(path).catch((err) => {
+				console.error(`MinIO sync: failed to push ${path}`, err);
+				new Notice(`MinIO sync: failed to push ${path}: ${(err as Error).message}`);
+			});
 		}, PUSH_DEBOUNCE_MS);
 		this.debounceTimers.set(path, timer);
 	}
@@ -157,6 +160,7 @@ export class SyncOrchestrator {
 			try {
 				await this.applyForPath(path, localByPath.get(path), remoteByPath.get(path), tombstonedPaths.has(path), manifest, summary);
 			} catch (err) {
+				console.error(`MinIO sync: failed to sync ${path}`, err);
 				summary.errors.push({ path, message: (err as Error).message });
 			}
 		}

@@ -70,8 +70,14 @@ async function deriveSigningKey(secretKey: string, dateStamp: string): Promise<A
 }
 
 async function s3Request(cfg: S3Config, opts: S3RequestOptions): Promise<RequestUrlResponse> {
-	const host = `${cfg.endpoint}:${cfg.port}`;
 	const scheme = cfg.useSSL ? 'https' : 'http';
+	// Host header must match what the network layer will actually send, which — like any
+	// HTTP client — omits the port when it's the scheme's default. Electron's `net` module
+	// (which `requestUrl` uses on desktop) rejects requests that set `Host` explicitly with
+	// a hard net::ERR_INVALID_ARGUMENT, so we let it derive Host from the URL and only sign
+	// against the value it will produce.
+	const isDefaultPort = (scheme === 'https' && cfg.port === 443) || (scheme === 'http' && cfg.port === 80);
+	const host = isDefaultPort ? cfg.endpoint : `${cfg.endpoint}:${cfg.port}`;
 
 	const pathSegments = [cfg.bucket, ...(opts.key !== undefined ? opts.key.split('/') : [])];
 	const canonicalPath = '/' + pathSegments.map(uriEncode).join('/');
@@ -110,10 +116,13 @@ async function s3Request(cfg: S3Config, opts: S3RequestOptions): Promise<Request
 
 	const url = `${scheme}://${host}${canonicalPath}${canonicalQuery ? '?' + canonicalQuery : ''}`;
 
+	// `host` stays in headersToSign (S3 requires it in SignedHeaders) but is not sent
+	// explicitly — see the ERR_INVALID_ARGUMENT note above. The network layer sets it from `url`.
+	const { host: _host, ...sendHeaders } = headersToSign;
 	return requestUrl({
 		url,
 		method: opts.method,
-		headers: { ...headersToSign, Authorization: authorization },
+		headers: { ...sendHeaders, Authorization: authorization },
 		body: opts.body,
 		throw: false,
 	});

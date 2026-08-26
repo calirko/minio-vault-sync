@@ -69,6 +69,7 @@ export class SetupModal extends Modal {
 						await new SyncEngine(this.draft).testConnection();
 						new Notice('Connection OK');
 					} catch (err) {
+						console.error('MinIO sync: connection test failed', err);
 						new Notice(`Connection failed: ${(err as Error).message}`);
 					} finally {
 						btn.setDisabled(false);
