@@ -1,0 +1,23 @@
+{
+	"name": "obsidian-minio-sync",
+	"version": "0.1.0",
+	"description": "Sync an Obsidian vault to a MinIO bucket across devices.",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"version": "node version-bump.mjs && git add manifest.json versions.json"
+	},
+	"keywords": [],
+	"license": "0-BSD",
+	"dependencies": {
+		"minio": "^8.0.1"
+	},
+	"devDependencies": {
+		"@types/node": "^22.15.17",
+		"esbuild": "0.25.5",
+		"obsidian": "latest",
+		"typescript": "^5.8.3"
+	}
+}
