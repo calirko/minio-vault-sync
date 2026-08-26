@@ -110,6 +110,21 @@ export class SyncOrchestrator {
 		await this.pushSingleFile(newPath);
 	}
 
+	/** Single-word sync status for one path, used by the status bar. */
+	async getSyncStatus(path: string): Promise<'synced' | 'unsynced'> {
+		if (this.isExcluded(path)) return 'synced';
+		if (this.debounceTimers.has(path)) return 'unsynced';
+
+		const stat = await this.app.vault.adapter.stat(path);
+		if (!stat) return 'unsynced';
+
+		const manifest = await this.manifestStore.load();
+		const entry = manifest.entries[path];
+		if (!entry || entry.localMtime !== stat.mtime) return 'unsynced';
+
+		return 'synced';
+	}
+
 	async runFullSync(): Promise<SyncSummary> {
 		return this.enqueue(() => this.runFullSyncInner());
 	}

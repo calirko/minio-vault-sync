@@ -19,6 +19,8 @@ export default class MinioSyncPlugin extends Plugin {
 	sync: SyncEngine | null = null;
 	orchestrator: SyncOrchestrator | null = null;
 	private intervalId: number | null = null;
+	private syncStatusBarItem!: HTMLElement;
+	private syncStatusToken = 0;
 
 	async onload() {
 		await this.loadSettings();
@@ -29,6 +31,11 @@ export default class MinioSyncPlugin extends Plugin {
 		});
 
 		this.addSettingTab(new MinioSyncSettingTab(this.app, this));
+
+		this.syncStatusBarItem = this.addStatusBarItem();
+		this.registerEvent(
+			this.app.workspace.on('active-leaf-change', () => this.updateSyncStatusBar()),
+		);
 
 		this.addCommand({
 			id: 'setup',
@@ -68,6 +75,8 @@ export default class MinioSyncPlugin extends Plugin {
 					);
 				} catch (err) {
 					new Notice(`MinIO sync failed: ${(err as Error).message}`);
+				} finally {
+					this.updateSyncStatusBar();
 				}
 			},
 		});
@@ -76,9 +85,11 @@ export default class MinioSyncPlugin extends Plugin {
 		// spurious "create" events Obsidian fires for the whole vault during startup.
 		this.app.workspace.onLayoutReady(() => {
 			this.registerVaultListeners();
+			this.updateSyncStatusBar();
 			this.orchestrator
 				?.runFullSync()
-				.catch((err) => new Notice(`MinIO sync: startup sync failed: ${(err as Error).message}`));
+				.catch((err) => new Notice(`MinIO sync: startup sync failed: ${(err as Error).message}`))
+				.finally(() => this.updateSyncStatusBar());
 		});
 
 		// Best-effort: Obsidian does not guarantee this callback actually runs.
@@ -109,6 +120,7 @@ export default class MinioSyncPlugin extends Plugin {
 				if (!(file instanceof TFile)) return;
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
 				this.orchestrator?.scheduleDebouncedPush(file.path);
+				this.updateSyncStatusBar();
 			}),
 		);
 		this.registerEvent(
@@ -116,6 +128,7 @@ export default class MinioSyncPlugin extends Plugin {
 				if (!(file instanceof TFile)) return;
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
 				this.orchestrator?.scheduleDebouncedPush(file.path);
+				this.updateSyncStatusBar();
 			}),
 		);
 		this.registerEvent(
@@ -124,7 +137,8 @@ export default class MinioSyncPlugin extends Plugin {
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
 				this.orchestrator
 					?.deleteSingleFile(file.path)
-					.catch((err) => new Notice(`MinIO sync: failed to delete ${file.path}: ${(err as Error).message}`));
+					.catch((err) => new Notice(`MinIO sync: failed to delete ${file.path}: ${(err as Error).message}`))
+					.finally(() => this.updateSyncStatusBar());
 			}),
 		);
 		this.registerEvent(
@@ -133,9 +147,34 @@ export default class MinioSyncPlugin extends Plugin {
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
 				this.orchestrator
 					?.renameFile(oldPath, file.path)
-					.catch((err) => new Notice(`MinIO sync: failed to sync rename of ${file.path}: ${(err as Error).message}`));
+					.catch((err) => new Notice(`MinIO sync: failed to sync rename of ${file.path}: ${(err as Error).message}`))
+					.finally(() => this.updateSyncStatusBar());
 			}),
 		);
+	}
+
+	/** Refreshes the status bar with a single word describing whether the active file is synced. */
+	private updateSyncStatusBar() {
+		if (!this.syncStatusBarItem) return;
+
+		const token = ++this.syncStatusToken;
+		const file = this.app.workspace.getActiveFile();
+
+		if (!this.orchestrator || !file) {
+			this.syncStatusBarItem.setText('');
+			return;
+		}
+
+		this.orchestrator
+			.getSyncStatus(file.path)
+			.then((status) => {
+				if (token !== this.syncStatusToken) return;
+				this.syncStatusBarItem.setText(status === 'synced' ? 'Synced' : 'Unsynced');
+			})
+			.catch(() => {
+				if (token !== this.syncStatusToken) return;
+				this.syncStatusBarItem.setText('');
+			});
 	}
 
 	async loadSettings() {
@@ -170,12 +209,15 @@ export default class MinioSyncPlugin extends Plugin {
 				() =>
 					this.orchestrator
 						?.runFullSync()
-						.catch((err) => new Notice(`MinIO sync: periodic sync failed: ${(err as Error).message}`)),
+						.catch((err) => new Notice(`MinIO sync: periodic sync failed: ${(err as Error).message}`))
+						.finally(() => this.updateSyncStatusBar()),
 				this.settings.syncIntervalMinutes * 60_000,
 			);
 			this.registerInterval(this.intervalId);
 		} else {
 			this.orchestrator = null;
 		}
+
+		this.updateSyncStatusBar();
 	}
 }
