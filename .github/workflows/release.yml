@@ -27,7 +27,7 @@ jobs:
         run: |
           mkdir -p release-assets
           cp main.js manifest.json release-assets/
-          [ -f styles.css ] && cp styles.css release-assets/
+          if [ -f styles.css ]; then cp styles.css release-assets/; fi
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v1
@@ -40,7 +40,7 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           assets=(release-assets/main.js release-assets/manifest.json)
-          [ -f release-assets/styles.css ] && assets+=(release-assets/styles.css)
+          if [ -f release-assets/styles.css ]; then assets+=(release-assets/styles.css); fi
           gh release create "$tag" "${assets[@]}" \
             --title "$tag" \
             --generate-notes
