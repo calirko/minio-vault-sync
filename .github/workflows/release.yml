@@ -23,18 +23,24 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      - name: Collect release assets
+        run: |
+          mkdir -p release-assets
+          cp main.js manifest.json release-assets/
+          [ -f styles.css ] && cp styles.css release-assets/
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: main.js
+          subject-path: release-assets/*
 
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          assets=(main.js manifest.json)
-          [ -f styles.css ] && assets+=(styles.css)
+          assets=(release-assets/main.js release-assets/manifest.json)
+          [ -f release-assets/styles.css ] && assets+=(release-assets/styles.css)
           gh release create "$tag" "${assets[@]}" \
             --title "$tag" \
             --generate-notes
