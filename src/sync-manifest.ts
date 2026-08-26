@@ -28,7 +28,7 @@ export class SyncManifestStore {
 		try {
 			if (!(await this.adapter.exists(this.manifestPath))) return emptyManifest();
 			const raw = await this.adapter.read(this.manifestPath);
-			const parsed = JSON.parse(raw);
+			const parsed = JSON.parse(raw) as Partial<SyncManifest> | null;
 			if (parsed && parsed.version === 1 && parsed.entries) return parsed as SyncManifest;
 			return emptyManifest();
 		} catch {

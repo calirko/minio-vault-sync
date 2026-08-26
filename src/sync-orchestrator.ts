@@ -1,23 +1,19 @@
-import { createHash } from 'crypto';
 import { App, Notice } from 'obsidian';
 import type { SyncEngine } from './sync';
 import { SyncManifestStore, type SyncManifest } from './sync-manifest';
 import { listLocalTree } from './local-scan';
 import { decideAction } from './sync-decide';
 import { conflictPathFor, isTombstoneKey, originalPathFromTombstoneKey } from './sync';
+import { md5Hex } from './md5';
 import { emptySummary, type LocalEntry, type SyncSummary } from './sync-types';
 
 const PUSH_DEBOUNCE_MS = 10_000;
 const SUPPRESSION_EXPIRY_MS = 2_000;
 
-function toArrayBuffer(buf: Buffer): ArrayBuffer {
-	return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-}
-
 export class SyncOrchestrator {
 	private manifestStore: SyncManifestStore;
-	private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	private suppressedPaths = new Map<string, ReturnType<typeof setTimeout>>();
+	private debounceTimers = new Map<string, ReturnType<typeof window.setTimeout>>();
+	private suppressedPaths = new Map<string, ReturnType<typeof window.setTimeout>>();
 	private opQueue: Promise<void> = Promise.resolve();
 
 	constructor(
@@ -41,8 +37,8 @@ export class SyncOrchestrator {
 
 	private markSuppressed(path: string) {
 		const existing = this.suppressedPaths.get(path);
-		if (existing) clearTimeout(existing);
-		const timer = setTimeout(() => this.suppressedPaths.delete(path), SUPPRESSION_EXPIRY_MS);
+		if (existing) window.clearTimeout(existing);
+		const timer = window.setTimeout(() => this.suppressedPaths.delete(path), SUPPRESSION_EXPIRY_MS);
 		this.suppressedPaths.set(path, timer);
 	}
 
@@ -50,7 +46,7 @@ export class SyncOrchestrator {
 	wasSelfWrite(path: string): boolean {
 		const timer = this.suppressedPaths.get(path);
 		if (!timer) return false;
-		clearTimeout(timer);
+		window.clearTimeout(timer);
 		this.suppressedPaths.delete(path);
 		return true;
 	}
@@ -58,8 +54,8 @@ export class SyncOrchestrator {
 	scheduleDebouncedPush(path: string) {
 		if (this.isExcluded(path)) return;
 		const existing = this.debounceTimers.get(path);
-		if (existing) clearTimeout(existing);
-		const timer = setTimeout(() => {
+		if (existing) window.clearTimeout(existing);
+		const timer = window.setTimeout(() => {
 			this.debounceTimers.delete(path);
 			this.pushSingleFile(path).catch((err) => new Notice(`MinIO sync: failed to push ${path}: ${(err as Error).message}`));
 		}, PUSH_DEBOUNCE_MS);
@@ -67,9 +63,9 @@ export class SyncOrchestrator {
 	}
 
 	cancelPendingDebounces() {
-		for (const timer of this.debounceTimers.values()) clearTimeout(timer);
+		for (const timer of this.debounceTimers.values()) window.clearTimeout(timer);
 		this.debounceTimers.clear();
-		for (const timer of this.suppressedPaths.values()) clearTimeout(timer);
+		for (const timer of this.suppressedPaths.values()) window.clearTimeout(timer);
 		this.suppressedPaths.clear();
 	}
 
@@ -84,7 +80,7 @@ export class SyncOrchestrator {
 			if (!stat) return;
 			const manifest = await this.manifestStore.load();
 			const bytes = await this.app.vault.adapter.readBinary(path);
-			const { etag } = await this.engine.upload(path, Buffer.from(bytes), stat.mtime);
+			const { etag } = await this.engine.upload(path, bytes, stat.mtime);
 			manifest.entries[path] = { localMtime: stat.mtime, remoteEtag: etag, size: bytes.byteLength };
 			await this.manifestStore.save(manifest);
 		});
@@ -95,7 +91,7 @@ export class SyncOrchestrator {
 		return this.enqueue(async () => {
 			const timer = this.debounceTimers.get(path);
 			if (timer) {
-				clearTimeout(timer);
+				window.clearTimeout(timer);
 				this.debounceTimers.delete(path);
 			}
 			await this.engine.tombstone(path);
@@ -187,7 +183,7 @@ export class SyncOrchestrator {
 
 		const localHash = async () => {
 			const bytes = await adapter.readBinary(path);
-			return createHash('md5').update(Buffer.from(bytes)).digest('hex');
+			return md5Hex(bytes);
 		};
 
 		const action = await decideAction(path, local, remote, remoteTombstoned, manifestEntry, localHash);
@@ -203,7 +199,7 @@ export class SyncOrchestrator {
 			case 'push': {
 				if (!local) return;
 				const bytes = await adapter.readBinary(path);
-				const { etag } = await this.engine.upload(path, Buffer.from(bytes), local.mtime);
+				const { etag } = await this.engine.upload(path, bytes, local.mtime);
 				manifest.entries[path] = { localMtime: local.mtime, remoteEtag: etag, size: bytes.byteLength };
 				summary.pushed.push(path);
 				return;
@@ -213,7 +209,7 @@ export class SyncOrchestrator {
 				const bytes = await this.engine.downloadToBuffer(path);
 				await this.ensureParentFolder(path);
 				this.markSuppressed(path);
-				await adapter.writeBinary(path, toArrayBuffer(bytes));
+				await adapter.writeBinary(path, bytes);
 				const stat = await adapter.stat(path);
 				manifest.entries[path] = { localMtime: stat?.mtime ?? Date.now(), remoteEtag: remote?.etag ?? '', size: bytes.byteLength };
 				summary.pulled.push(path);
@@ -236,7 +232,7 @@ export class SyncOrchestrator {
 			case 'revive-local': {
 				if (!local) return;
 				const bytes = await adapter.readBinary(path);
-				const { etag } = await this.engine.upload(path, Buffer.from(bytes), local.mtime);
+				const { etag } = await this.engine.upload(path, bytes, local.mtime);
 				await this.engine.removeTombstone(path);
 				manifest.entries[path] = { localMtime: local.mtime, remoteEtag: etag, size: bytes.byteLength };
 				summary.revived.push(path);
@@ -264,10 +260,10 @@ export class SyncOrchestrator {
 		await adapter.rename(path, conflictPath);
 		const conflictStat = await adapter.stat(conflictPath);
 		const localMtimeOfBytes = conflictStat?.mtime ?? Date.now();
-		const { etag: conflictEtag } = await this.engine.upload(conflictPath, Buffer.from(bytes), localMtimeOfBytes);
+		const { etag: conflictEtag } = await this.engine.upload(conflictPath, bytes, localMtimeOfBytes);
 
 		const remoteBytes = await this.engine.downloadToBuffer(path);
-		await adapter.writeBinary(path, toArrayBuffer(remoteBytes));
+		await adapter.writeBinary(path, remoteBytes);
 		const originalStat = await adapter.stat(path);
 
 		const remoteMeta = await this.engine.statRemote(path);

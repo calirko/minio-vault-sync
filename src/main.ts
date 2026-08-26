@@ -178,7 +178,8 @@ export default class MinioSyncPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const data = (await this.loadData()) as Partial<MinioSyncSettings> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 	}
 
 	async saveSettings() {
@@ -205,14 +206,12 @@ export default class MinioSyncPlugin extends Plugin {
 				excludePrefixes,
 			);
 
-			this.intervalId = window.setInterval(
-				() =>
-					this.orchestrator
-						?.runFullSync()
-						.catch((err) => new Notice(`MinIO sync: periodic sync failed: ${(err as Error).message}`))
-						.finally(() => this.updateSyncStatusBar()),
-				this.settings.syncIntervalMinutes * 60_000,
-			);
+			this.intervalId = window.setInterval(() => {
+				this.orchestrator
+					?.runFullSync()
+					.catch((err) => new Notice(`MinIO sync: periodic sync failed: ${(err as Error).message}`))
+					.finally(() => this.updateSyncStatusBar());
+			}, this.settings.syncIntervalMinutes * 60_000);
 			this.registerInterval(this.intervalId);
 		} else {
 			this.orchestrator = null;

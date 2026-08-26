@@ -1,5 +1,4 @@
-import { Client, CopyDestinationOptions, CopySourceOptions } from 'minio';
-import type { Readable } from 'stream';
+import { S3Client } from './s3-client';
 import type { MinioSyncSettings } from './settings';
 import type { RemoteEntry } from './sync-types';
 
@@ -36,93 +35,57 @@ export function conflictPathFor(path: string, deviceNickname: string, disambigua
 	return joinPath(dir, `${prefix}${base}`);
 }
 
-function streamToBuffer(stream: Readable): Promise<Buffer> {
-	return new Promise((resolve, reject) => {
-		const chunks: Buffer[] = [];
-		stream.on('data', (chunk) => chunks.push(chunk as Buffer));
-		stream.on('end', () => resolve(Buffer.concat(chunks)));
-		stream.on('error', reject);
-	});
-}
-
-/** Thin wrapper around the MinIO client. */
+/** Thin wrapper around the hand-rolled S3 client, exposing sync-shaped operations. */
 export class SyncEngine {
-	private client: Client;
-	private bucket: string;
+	private client: S3Client;
 
 	constructor(settings: MinioSyncSettings) {
-		this.client = new Client({
-			endPoint: settings.endpoint,
+		this.client = new S3Client({
+			endpoint: settings.endpoint,
 			port: settings.port,
 			useSSL: settings.useSSL,
 			accessKey: settings.accessKey,
 			secretKey: settings.secretKey,
+			bucket: settings.bucket,
 		});
-		this.bucket = settings.bucket;
 	}
 
 	async testConnection(): Promise<boolean> {
-		return this.client.bucketExists(this.bucket);
+		return this.client.bucketExists();
 	}
 
 	/** Lists every object in the bucket, tombstone keys included as-is. */
 	async listRemote(): Promise<Map<string, RemoteEntry>> {
 		const entries = new Map<string, RemoteEntry>();
-		await new Promise<void>((resolve, reject) => {
-			const stream = this.client.listObjectsV2(this.bucket, '', true);
-			stream.on('data', (item) => {
-				if (!item.name) return;
-				entries.set(item.name, {
-					path: item.name,
-					etag: (item.etag ?? '').replace(/"/g, ''),
-					lastModified: item.lastModified ? item.lastModified.getTime() : 0,
-					size: item.size ?? 0,
-				});
-			});
-			stream.on('end', () => resolve());
-			stream.on('error', reject);
-		});
+		for (const obj of await this.client.listAllObjects()) {
+			entries.set(obj.key, { path: obj.key, etag: obj.etag, lastModified: obj.lastModified, size: obj.size });
+		}
 		return entries;
 	}
 
 	async statRemote(path: string): Promise<{ etag: string } | null> {
-		try {
-			const stat = await this.client.statObject(this.bucket, path);
-			return { etag: (stat.etag ?? '').replace(/"/g, '') };
-		} catch {
-			return null;
-		}
+		return this.client.statObject(path);
 	}
 
-	async downloadToBuffer(path: string): Promise<Buffer> {
-		const stream = await this.client.getObject(this.bucket, path);
-		return streamToBuffer(stream);
+	async downloadToBuffer(path: string): Promise<ArrayBuffer> {
+		return this.client.getObject(path);
 	}
 
-	async upload(path: string, data: Buffer, localMtimeMs: number): Promise<{ etag: string }> {
-		const info = await this.client.putObject(this.bucket, path, data, data.length, {
-			mtime: String(localMtimeMs),
-		});
-		return { etag: (info.etag ?? '').replace(/"/g, '') };
+	async upload(path: string, data: ArrayBuffer, localMtimeMs: number): Promise<{ etag: string }> {
+		return this.client.putObject(path, data, { 'x-amz-meta-mtime': String(localMtimeMs) });
 	}
 
 	/** Renames the object to a tombstone key rather than truly deleting it, so other devices can detect the delete. */
 	async tombstone(path: string): Promise<void> {
-		const dest = new CopyDestinationOptions({ Bucket: this.bucket, Object: tombstoneKeyFor(path) });
-		const source = new CopySourceOptions({ Bucket: this.bucket, Object: path });
-		try {
-			await this.client.copyObject(source, dest);
-		} catch (err) {
-			// Nothing was ever pushed for this path (e.g. created and deleted before the
-			// debounce fired) — there's nothing remote to tombstone, so this is a no-op.
-			if ((err as { code?: string }).code === 'NoSuchKey' || (err as { code?: string }).code === 'NotFound') return;
-			throw err;
-		}
-		await this.client.removeObject(this.bucket, path);
+		const copied = await this.client.copyObject(path, tombstoneKeyFor(path));
+		// Nothing was ever pushed for this path (e.g. created and deleted before the
+		// debounce fired) — there's nothing remote to tombstone, so this is a no-op.
+		if (!copied) return;
+		await this.client.deleteObject(path);
 	}
 
 	/** Removes a tombstone marker, used when a local edit revives a remotely-deleted file. */
 	async removeTombstone(path: string): Promise<void> {
-		await this.client.removeObject(this.bucket, tombstoneKeyFor(path));
+		await this.client.deleteObject(tombstoneKeyFor(path));
 	}
 }
