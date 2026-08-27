@@ -1,7 +1,7 @@
 {
 	"id": "minio-vault-sync",
 	"name": "MinIO Vault Sync",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"minAppVersion": "1.13.0",
 	"description": "Syncs your vault files to a MinIO (S3-compatible) bucket so you can share them across devices.",
 	"author": "calirko",
