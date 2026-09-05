@@ -1,4 +1,4 @@
-import { Notice, Plugin, TAbstractFile, TFile } from 'obsidian';
+import { Notice, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
 import {
 	DEFAULT_SETTINGS,
 	MinioSyncSettings,
@@ -21,6 +21,7 @@ export default class MinioSyncPlugin extends Plugin {
 	private intervalId: number | null = null;
 	private syncStatusBarItem!: HTMLElement;
 	private syncStatusToken = 0;
+	private syncStatusBarTimer: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -34,8 +35,9 @@ export default class MinioSyncPlugin extends Plugin {
 
 		this.syncStatusBarItem = this.addStatusBarItem();
 		this.registerEvent(
-			this.app.workspace.on('active-leaf-change', () => this.updateSyncStatusBar()),
+			this.app.workspace.on('active-leaf-change', () => this.requestSyncStatusBarUpdate()),
 		);
+		this.registerEvent(this.app.workspace.on('file-open', () => this.requestSyncStatusBarUpdate()));
 
 		this.addCommand({
 			id: 'setup',
@@ -69,18 +71,7 @@ export default class MinioSyncPlugin extends Plugin {
 					new Notice('MinIO sync is not set up yet. Run "Setup MinIO sync" first.');
 					return;
 				}
-				try {
-					const summary = await this.orchestrator.runFullSync();
-					if (summary.errors.length) console.error('MinIO sync: per-file errors', summary.errors);
-					new Notice(
-						`MinIO sync done: ${summary.pushed.length} pushed, ${summary.pulled.length} pulled, ${summary.conflicts.length} conflict(s), ${summary.errors.length} error(s)`,
-					);
-				} catch (err) {
-					console.error('MinIO sync: sync-now failed', err);
-					new Notice(`MinIO sync failed: ${(err as Error).message}`);
-				} finally {
-					this.updateSyncStatusBar();
-				}
+				await this.runFullSyncWithNotice('manual');
 			},
 		});
 
@@ -89,16 +80,7 @@ export default class MinioSyncPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			this.registerVaultListeners();
 			this.updateSyncStatusBar();
-			this.orchestrator
-				?.runFullSync()
-				.then((summary) => {
-					if (summary.errors.length) console.error('MinIO sync: per-file errors', summary.errors);
-				})
-				.catch((err) => {
-					console.error('MinIO sync: startup sync failed', err);
-					new Notice(`MinIO sync: startup sync failed: ${(err as Error).message}`);
-				})
-				.finally(() => this.updateSyncStatusBar());
+			void this.runFullSyncWithNotice('startup');
 		});
 
 		// Best-effort: Obsidian does not guarantee this callback actually runs.
@@ -116,11 +98,35 @@ export default class MinioSyncPlugin extends Plugin {
 	}
 
 	onunload() {
+		if (this.syncStatusBarTimer !== null) {
+			window.clearTimeout(this.syncStatusBarTimer);
+			this.syncStatusBarTimer = null;
+		}
 		if (this.intervalId !== null) {
 			window.clearInterval(this.intervalId);
 			this.intervalId = null;
 		}
 		this.orchestrator?.cancelPendingDebounces();
+	}
+
+	/**
+	 * Runs a full sync and reports it the same way regardless of what triggered it — the
+	 * automatic startup/periodic runs get the identical summary toast as "Sync now".
+	 */
+	private async runFullSyncWithNotice(trigger: 'manual' | 'startup' | 'periodic'): Promise<void> {
+		if (!this.orchestrator) return;
+		try {
+			const summary = await this.orchestrator.runFullSync();
+			if (summary.errors.length) console.error('MinIO sync: per-file errors', summary.errors);
+			new Notice(
+				`MinIO sync done: ${summary.pushed.length} pushed, ${summary.pulled.length} pulled, ${summary.conflicts.length} conflict(s), ${summary.errors.length} error(s)`,
+			);
+		} catch (err) {
+			console.error(`MinIO sync: ${trigger} sync failed`, err);
+			new Notice(`MinIO sync failed: ${(err as Error).message}`);
+		} finally {
+			this.updateSyncStatusBar();
+		}
 	}
 
 	private registerVaultListeners() {
@@ -129,7 +135,7 @@ export default class MinioSyncPlugin extends Plugin {
 				if (!(file instanceof TFile)) return;
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
 				this.orchestrator?.scheduleDebouncedPush(file.path);
-				this.updateSyncStatusBar();
+				this.requestSyncStatusBarUpdate();
 			}),
 		);
 		this.registerEvent(
@@ -137,16 +143,23 @@ export default class MinioSyncPlugin extends Plugin {
 				if (!(file instanceof TFile)) return;
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
 				this.orchestrator?.scheduleDebouncedPush(file.path);
-				this.updateSyncStatusBar();
+				this.requestSyncStatusBarUpdate();
 			}),
 		);
+		// Obsidian fires exactly one delete/rename event for a folder and none for the files
+		// inside it, so folders need their own handling — otherwise deleting a folder silently
+		// leaves every file in it live in the bucket, and the next full sync pulls them back.
 		this.registerEvent(
 			this.app.vault.on('delete', (file: TAbstractFile) => {
-				if (!(file instanceof TFile)) return;
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
-				this.orchestrator
-					?.deleteSingleFile(file.path)
-					.catch((err) => {
+				const done =
+					file instanceof TFolder
+						? this.orchestrator?.deleteFolder(file.path)
+						: file instanceof TFile
+							? this.orchestrator?.deleteSingleFile(file.path)
+							: undefined;
+				done
+					?.catch((err) => {
 						console.error(`MinIO sync: failed to delete ${file.path}`, err);
 						new Notice(`MinIO sync: failed to delete ${file.path}: ${(err as Error).message}`);
 					})
@@ -155,17 +168,33 @@ export default class MinioSyncPlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
-				if (!(file instanceof TFile)) return;
 				if (this.orchestrator?.wasSelfWrite(file.path)) return;
-				this.orchestrator
-					?.renameFile(oldPath, file.path)
-					.catch((err) => {
+				const done =
+					file instanceof TFolder
+						? this.orchestrator?.renameFolder(oldPath, file.path)
+						: file instanceof TFile
+							? this.orchestrator?.renameFile(oldPath, file.path)
+							: undefined;
+				done
+					?.catch((err) => {
 						console.error(`MinIO sync: failed to sync rename of ${file.path}`, err);
 						new Notice(`MinIO sync: failed to sync rename of ${file.path}: ${(err as Error).message}`);
 					})
 					.finally(() => this.updateSyncStatusBar());
 			}),
 		);
+	}
+
+	/**
+	 * Coalesces status-bar refreshes onto the next tick. Sync progress and vault events can
+	 * fire many times a second, and each refresh reads the manifest off disk.
+	 */
+	private requestSyncStatusBarUpdate() {
+		if (this.syncStatusBarTimer !== null) return;
+		this.syncStatusBarTimer = window.setTimeout(() => {
+			this.syncStatusBarTimer = null;
+			this.updateSyncStatusBar();
+		}, 200);
 	}
 
 	/** Refreshes the status bar with a single word describing whether the active file is synced. */
@@ -225,17 +254,10 @@ export default class MinioSyncPlugin extends Plugin {
 				excludePrefixes,
 			);
 
+			this.orchestrator.onStateChange = () => this.requestSyncStatusBarUpdate();
+
 			this.intervalId = window.setInterval(() => {
-				this.orchestrator
-					?.runFullSync()
-					.then((summary) => {
-						if (summary.errors.length) console.error('MinIO sync: per-file errors', summary.errors);
-					})
-					.catch((err) => {
-						console.error('MinIO sync: periodic sync failed', err);
-						new Notice(`MinIO sync: periodic sync failed: ${(err as Error).message}`);
-					})
-					.finally(() => this.updateSyncStatusBar());
+				void this.runFullSyncWithNotice('periodic');
 			}, this.settings.syncIntervalMinutes * 60_000);
 			this.registerInterval(this.intervalId);
 		} else {

@@ -10,7 +10,25 @@ import { emptySummary, type LocalEntry, type SyncSummary } from './sync-types';
 const PUSH_DEBOUNCE_MS = 10_000;
 const SUPPRESSION_EXPIRY_MS = 2_000;
 
+function countChanges(summary: SyncSummary): number {
+	return (
+		summary.pushed.length +
+		summary.pulled.length +
+		summary.tombstoned.length +
+		summary.deletedLocal.length +
+		summary.revived.length +
+		summary.conflicts.length
+	);
+}
+
 export class SyncOrchestrator {
+	/**
+	 * Fired whenever anything that affects a file's sync status changes (a push scheduled,
+	 * an upload/download finished, a delete propagated). The plugin uses it to keep the
+	 * status bar live instead of only refreshing it when the active leaf changes.
+	 */
+	onStateChange: (() => void) | null = null;
+
 	private manifestStore: SyncManifestStore;
 	private debounceTimers = new Map<string, ReturnType<typeof window.setTimeout>>();
 	private suppressedPaths = new Map<string, ReturnType<typeof window.setTimeout>>();
@@ -33,6 +51,14 @@ export class SyncOrchestrator {
 			() => undefined,
 		);
 		return run;
+	}
+
+	private notify() {
+		try {
+			this.onStateChange?.();
+		} catch (err) {
+			console.error('MinIO sync: state-change listener threw', err);
+		}
 	}
 
 	private markSuppressed(path: string) {
@@ -63,6 +89,18 @@ export class SyncOrchestrator {
 			});
 		}, PUSH_DEBOUNCE_MS);
 		this.debounceTimers.set(path, timer);
+		// The path is now pending, i.e. unsynced — surface that immediately.
+		this.notify();
+	}
+
+	/** Clears any pending debounced push for every path in the subtree rooted at `folderPath`. */
+	private cancelDebouncesUnder(folderPath: string) {
+		const prefix = `${folderPath}/`;
+		for (const [path, timer] of [...this.debounceTimers]) {
+			if (path !== folderPath && !path.startsWith(prefix)) continue;
+			window.clearTimeout(timer);
+			this.debounceTimers.delete(path);
+		}
 	}
 
 	cancelPendingDebounces() {
@@ -86,7 +124,7 @@ export class SyncOrchestrator {
 			const { etag } = await this.engine.upload(path, bytes, stat.mtime);
 			manifest.entries[path] = { localMtime: stat.mtime, remoteEtag: etag, size: bytes.byteLength };
 			await this.manifestStore.save(manifest);
-		});
+		}).finally(() => this.notify());
 	}
 
 	async deleteSingleFile(path: string): Promise<void> {
@@ -101,12 +139,53 @@ export class SyncOrchestrator {
 			const manifest = await this.manifestStore.load();
 			delete manifest.entries[path];
 			await this.manifestStore.save(manifest);
-		});
+		}).finally(() => this.notify());
+	}
+
+	/**
+	 * Propagates the delete of a whole folder. Obsidian fires a single `delete` event for the
+	 * folder and none for its children, so the children have to be enumerated here: from the
+	 * manifest (what this device synced) unioned with the bucket (what any device pushed).
+	 */
+	async deleteFolder(folderPath: string): Promise<void> {
+		if (this.isExcluded(folderPath)) return;
+		const prefix = `${folderPath}/`;
+		return this.enqueue(async () => {
+			this.cancelDebouncesUnder(folderPath);
+
+			const manifest = await this.manifestStore.load();
+			const paths = new Set<string>(
+				Object.keys(manifest.entries).filter((path) => path.startsWith(prefix)),
+			);
+			for (const key of (await this.engine.listRemote()).keys()) {
+				if (!isTombstoneKey(key) && key.startsWith(prefix)) paths.add(key);
+			}
+
+			for (const path of paths) {
+				if (this.isExcluded(path)) continue;
+				// Skip anything that still exists locally: Obsidian also fires a folder delete
+				// when it prunes a folder that merely became empty, and a stale bucket listing
+				// must never take a live local file down with it.
+				if (await this.app.vault.adapter.exists(path)) continue;
+				await this.engine.tombstone(path);
+				delete manifest.entries[path];
+			}
+			await this.manifestStore.save(manifest);
+		}).finally(() => this.notify());
 	}
 
 	async renameFile(oldPath: string, newPath: string): Promise<void> {
 		await this.deleteSingleFile(oldPath);
 		await this.pushSingleFile(newPath);
+	}
+
+	/** Folder renames, like folder deletes, arrive as one event with no per-child events. */
+	async renameFolder(oldPath: string, newPath: string): Promise<void> {
+		await this.deleteFolder(oldPath);
+		const moved = await listLocalTree(this.app.vault.adapter, this.excludePrefixes, newPath);
+		for (const entry of moved) {
+			await this.pushSingleFile(entry.path);
+		}
 	}
 
 	/** Single-word sync status for one path, used by the status bar. */
@@ -125,7 +204,7 @@ export class SyncOrchestrator {
 	}
 
 	async runFullSync(): Promise<SyncSummary> {
-		return this.enqueue(() => this.runFullSyncInner());
+		return this.enqueue(() => this.runFullSyncInner()).finally(() => this.notify());
 	}
 
 	private async runFullSyncInner(): Promise<SyncSummary> {
@@ -169,7 +248,11 @@ export class SyncOrchestrator {
 					await this.engine.removeTombstone(path);
 					tombstoned = false;
 				}
+				const before = countChanges(summary);
 				await this.applyForPath(path, localByPath.get(path), remote, tombstoned, manifest, summary);
+				// Ping the status bar as each file lands rather than only at the end, so a long
+				// sync visibly progresses instead of flipping state in one jump when it finishes.
+				if (countChanges(summary) !== before) this.notify();
 			} catch (err) {
 				console.error(`MinIO sync: failed to sync ${path}`, err);
 				summary.errors.push({ path, message: (err as Error).message });

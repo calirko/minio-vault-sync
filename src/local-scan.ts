@@ -5,8 +5,15 @@ function isExcluded(path: string, excludePrefixes: string[]): boolean {
 	return excludePrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
-/** Recursively walks the vault via the raw adapter (so `.obsidian` is included), skipping excluded prefixes. */
-export async function listLocalTree(adapter: DataAdapter, excludePrefixes: string[]): Promise<LocalEntry[]> {
+/**
+ * Recursively walks the vault via the raw adapter (so `.obsidian` is included), skipping
+ * excluded prefixes. `root` limits the walk to one subtree ('' walks the whole vault).
+ */
+export async function listLocalTree(
+	adapter: DataAdapter,
+	excludePrefixes: string[],
+	root = '',
+): Promise<LocalEntry[]> {
 	const results: LocalEntry[] = [];
 
 	async function walk(folder: string): Promise<void> {
@@ -25,6 +32,6 @@ export async function listLocalTree(adapter: DataAdapter, excludePrefixes: strin
 		}
 	}
 
-	await walk('');
+	await walk(root);
 	return results;
 }
