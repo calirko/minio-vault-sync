@@ -148,8 +148,9 @@ export class Vault {
 		}
 	}
 
-	async readText(path: string): Promise<{ content: string; info: FileInfo }> {
-		const info = await this.stat(path);
+	/** `known` (e.g. from a listing) skips the HEAD request; the GET still returns the authoritative etag. */
+	async readText(path: string, known?: FileInfo): Promise<{ content: string; info: FileInfo }> {
+		const info = known ?? (await this.stat(path));
 		if (!info) throw new VaultError(`File not found: ${path}`);
 		if (info.size > this.cfg.maxReadBytes) {
 			throw new VaultError(`File is too large to read (${info.size} bytes, limit ${this.cfg.maxReadBytes}).`);
@@ -169,6 +170,52 @@ export class Vault {
 		const etag = stripQuotes(res.ETag) || info.etag;
 		this.textCache.set(path, { etag, text });
 		return { content: text, info: { ...info, etag } };
+	}
+
+	/**
+	 * Reads every text note under `prefix` (sorted by path) in one go, stopping once the
+	 * combined content would exceed `maxBytes`. Binary/oversized files are reported as skipped.
+	 */
+	async readFolder(
+		prefix: string,
+		opts: { recursive?: boolean; maxBytes: number },
+	): Promise<{ files: { content: string; info: FileInfo }[]; skipped: string[]; omitted: FileInfo[] }> {
+		const all = (await this.list(prefix))
+			.filter((f) => opts.recursive !== false || !f.path.slice(prefix.length).includes('/'))
+			.sort((a, b) => a.path.localeCompare(b.path));
+		const skipped: string[] = [];
+		const candidates = all.filter((f) => {
+			const ok = f.size <= this.cfg.maxReadBytes && SEARCHABLE_EXTENSIONS.some((ext) => f.path.toLowerCase().endsWith(ext));
+			if (!ok) skipped.push(f.path);
+			return ok;
+		});
+
+		// Decide what fits from listing sizes, so nothing is fetched just to be thrown away.
+		const chosen: FileInfo[] = [];
+		let budget = opts.maxBytes;
+		let i = 0;
+		for (; i < candidates.length; i++) {
+			const f = candidates[i]!;
+			if (f.size > budget && chosen.length) break;
+			chosen.push(f);
+			budget -= f.size;
+		}
+		const omitted = candidates.slice(i);
+
+		const results: ({ content: string; info: FileInfo } | null)[] = new Array(chosen.length).fill(null);
+		let next = 0;
+		const worker = async () => {
+			for (let n = next++; n < chosen.length; n = next++) {
+				const f = chosen[n]!;
+				try {
+					results[n] = await this.readText(f.path, f);
+				} catch {
+					skipped.push(f.path);
+				}
+			}
+		};
+		await Promise.all(Array.from({ length: 8 }, worker));
+		return { files: results.filter((r): r is { content: string; info: FileInfo } => r !== null), skipped, omitted };
 	}
 
 	async search(

@@ -26,6 +26,7 @@ const INSTRUCTIONS = `Tools for the user's Obsidian vault. Paths are vault-relat
 Before doing anything else in the vault, read "note.md" at the vault root: it explains this vault's conventions (structure, where new notes go, naming, tags). Follow it; where it conflicts with the general guidance below, it wins. If it does not exist, carry on with the guidance below.
 Notes are Markdown with Obsidian conventions ([[wikilinks]], #tags, YAML frontmatter).
 Before changing an existing note, read it: write_file and edit_file need the etag that read_file returned, and fail if the note changed in the meantime (re-read and retry).
+To read several notes in a folder, use read_folder (one call) instead of read_file per note.
 Prefer edit_file or append_to_file over rewriting a whole note. Changes sync to the user's devices within the plugin's sync interval.`;
 
 export function createMcpServer(vault: Vault): McpServer {
@@ -65,6 +66,50 @@ export function createMcpServer(vault: Vault): McpServer {
 				const p = vault.normalizePath(path);
 				const { content, info } = await vault.readText(p);
 				return ok(`path: ${p}\netag: ${info.etag}\nlastModified: ${info.lastModified ?? ''}\n---\n${content}`);
+			}),
+	);
+
+	server.registerTool(
+		'read_folder',
+		{
+			title: 'Read all notes in a folder',
+			description:
+				'Read every Markdown/text/canvas file under a folder in one call (sorted by path), each with its etag. ' +
+				'Much cheaper than list_files + read_file per note. Stops at max_bytes of content and lists what was left out.',
+			inputSchema: {
+				folder: z.string().describe('Folder to read, e.g. "Projects/Website". Use "" for the vault root.'),
+				recursive: z.boolean().optional().describe('Include subfolders (default true).'),
+				max_bytes: z
+					.number()
+					.int()
+					.min(1_000)
+					.max(1_000_000)
+					.optional()
+					.describe('Total content budget in bytes (default 200000).'),
+			},
+			annotations: { readOnlyHint: true },
+		},
+		({ folder, recursive, max_bytes }) =>
+			run(async () => {
+				const prefix = vault.normalizePrefix(folder);
+				const res = await vault.readFolder(prefix, { recursive, maxBytes: max_bytes ?? 200_000 });
+				if (!res.files.length && !res.omitted.length) {
+					return ok(res.skipped.length ? `No readable text notes (${res.skipped.length} non-text files skipped).` : 'No files.');
+				}
+				const parts = res.files.map(
+					({ content, info }) =>
+						`=== ${info.path}\netag: ${info.etag}\nlastModified: ${info.lastModified ?? ''}\n---\n${content}`,
+				);
+				const tail: string[] = [];
+				if (res.omitted.length) {
+					tail.push(
+						`… ${res.omitted.length} more notes not included (budget reached); read them with read_file, a narrower folder, or a larger max_bytes:`,
+						...res.omitted.slice(0, 100).map((f) => `- ${f.path}`),
+					);
+					if (res.omitted.length > 100) tail.push(`- … and ${res.omitted.length - 100} more`);
+				}
+				if (res.skipped.length) tail.push(`Skipped ${res.skipped.length} non-text, unreadable or oversized files.`);
+				return ok([...parts, ...(tail.length ? ['===', ...tail] : [])].join('\n\n'));
 			}),
 	);
 

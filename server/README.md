@@ -51,7 +51,7 @@ Tailscale Funnel) if it runs on your LAN.
 
 See `.env.example`. Useful safety settings:
 
-- `VAULT_READ_ONLY=true` exposes only `list_files`, `read_file` and `search`.
+- `VAULT_READ_ONLY=true` exposes only `list_files`, `read_file`, `read_folder` and `search`.
 - `VAULT_WRITABLE_PREFIXES=Inbox,Claude` limits writes to those folders.
 - `VAULT_HIDDEN_PREFIXES` (default `.obsidian,.trash`): paths Claude can't see at all.
   The tombstone namespace is always hidden.
@@ -110,6 +110,7 @@ Rules to keep the two halves separate:
 |---|---|---|
 | `list_files` | ✅ | Optional folder filter. Hides tombstones and hidden prefixes. |
 | `read_file` | ✅ | Returns content plus ETag (needed for safe writes). Text only, size-capped. |
+| `read_folder` | ✅ | Every text note under a folder in one call (path-sorted, each with ETag), capped by a byte budget (default 200 KB); lists what didn't fit. |
 | `search` | ✅ | Substring/regex over `.md`/`.txt`/`.canvas` and file names. ETag-keyed in-memory cache. |
 | `write_file` | ✅ | Create (`If-None-Match: *`) or overwrite (requires ETag, `If-Match`). |
 | `edit_file` | ✅ | Exact find and replace, conditional on the ETag Claude read. |
