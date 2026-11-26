@@ -47,6 +47,17 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
 const httpServer = createServer(async (req, res) => {
 	const { pathname } = new URL(req.url ?? '/', 'http://localhost');
 
+	// One access-log line per request, with the URL token redacted, so connection problems
+	// (e.g. a proxy blocking the client, or an unexpected probe path) show up in the logs.
+	const started = Date.now();
+	res.on('finish', () => {
+		if (pathname === '/healthz') return;
+		const shownPath = pathname.startsWith('/mcp/') ? '/mcp/<token>' : pathname;
+		const ua = req.headers['user-agent'] ?? '-';
+		const auth = req.headers.authorization ? 'auth-header' : 'no-auth-header';
+		console.log(`${req.method} ${shownPath} ${res.statusCode} ${Date.now() - started}ms ${auth} ua="${ua}"`);
+	});
+
 	if (pathname === '/healthz') return sendJson(res, 200, { ok: true });
 	if (!pathname.startsWith('/mcp')) return sendJson(res, 404, { error: 'Not found' });
 	if (!authorize(req, pathname)) return sendJson(res, 401, { error: 'Unauthorized' });
