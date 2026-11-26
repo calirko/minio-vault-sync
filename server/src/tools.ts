@@ -23,6 +23,7 @@ async function run(fn: () => Promise<CallToolResult>): Promise<CallToolResult> {
 }
 
 const INSTRUCTIONS = `Tools for the user's Obsidian vault. Paths are vault-relative, e.g. "Projects/Plan.md".
+Before doing anything else in the vault, read "note.md" at the vault root: it explains this vault's conventions (structure, where new notes go, naming, tags). Follow it; where it conflicts with the general guidance below, it wins. If it does not exist, carry on with the guidance below.
 Notes are Markdown with Obsidian conventions ([[wikilinks]], #tags, YAML frontmatter).
 Before changing an existing note, read it: write_file and edit_file need the etag that read_file returned, and fail if the note changed in the meantime (re-read and retry).
 Prefer edit_file or append_to_file over rewriting a whole note. Changes sync to the user's devices within the plugin's sync interval.`;
