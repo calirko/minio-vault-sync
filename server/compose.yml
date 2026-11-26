@@ -1,0 +1,39 @@
+services:
+  vault-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vault-mcp
+    # MCP_AUTH_TOKEN and the S3_* credentials come straight from .env (Dokploy's
+    # Environment tab writes it); don't re-list them under environment, which overrides env_file.
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=8787
+      - TZ=America/Sao_Paulo
+    networks:
+      dragon:
+        aliases:
+          - vault-mcp
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    healthcheck:
+      # Alpine image: busybox wget, no curl.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  dragon:
+    external: true

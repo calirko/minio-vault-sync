@@ -1,0 +1,25 @@
+{
+	"name": "vault-mcp-server",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Remote MCP server that lets Claude read and edit the MinIO bucket synced by minio-vault-sync.",
+	"type": "module",
+	"main": "dist/index.js",
+	"scripts": {
+		"dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+		"build": "tsc",
+		"start": "node --env-file-if-exists=.env dist/index.js",
+		"typecheck": "tsc --noEmit"
+	},
+	"license": "0-BSD",
+	"dependencies": {
+		"@aws-sdk/client-s3": "^3.1178.0",
+		"@modelcontextprotocol/sdk": "^1.32.2",
+		"zod": "^4.6.7"
+	},
+	"devDependencies": {
+		"@types/node": "^26.6.11",
+		"tsx": "^4.23.15",
+		"typescript": "^7.0.2"
+	}
+}
